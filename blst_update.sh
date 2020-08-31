@@ -12,8 +12,8 @@ git log HEAD^..HEAD >> ../blst_version.txt
 
 # Make blst a part of this repo
 rm -fr .git
-rm -f go.mod
 git add .
+git add -f go.mod
 
 # Build libblst.a
 ./build.sh
