@@ -13,7 +13,7 @@ use groupy::EncodedPoint;
 use paired::bls12_381::{
     Fq, Fr, G1Affine, G1Uncompressed, G2Affine, G2Uncompressed, Bls12,
 };
-use std::str::FromStr;
+use std::path::Path;
 
 extern "C" {
 //     //pub fn print_blst_fr(fr: *const blst_fr);
@@ -100,8 +100,8 @@ pub fn scalar_from_u64(limbs: &[u64; 4]) -> blst_scalar {
 pub fn verify_batch_proof(proof_vec: &[u8], num_proofs: usize, 
                           public_inputs: &[blst_fr], num_inputs: usize,
                           rand_z: &[blst_scalar], nbits: usize,
-                          vk_path: &str) -> bool {
-    let s = String::from_str(vk_path).unwrap();
+                          vk_path: &Path) -> bool {
+    let s = vk_path.to_str().expect("Path is expected to be valid UTF-8").to_string();
     let vk_bytes = s.into_bytes();
     unsafe {
         verify_batch_proof_c(&(proof_vec[0]), num_proofs,
