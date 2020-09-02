@@ -98,8 +98,8 @@ pub fn scalar_from_u64(limbs: &[u64; 4]) -> blst_scalar {
 }
 
 pub fn verify_batch_proof(proof_vec: &[u8], num_proofs: usize, 
-                          public_inputs: &Vec<blst_fr>, num_inputs: usize,
-                          rand_z: &Vec<blst_scalar>, nbits: usize,
+                          public_inputs: &[blst_fr], num_inputs: usize,
+                          rand_z: &[blst_scalar], nbits: usize,
                           vk_path: &str) -> bool {
     let s = String::from_str(vk_path).unwrap();
     let vk_bytes = s.into_bytes();
