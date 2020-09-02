@@ -63,14 +63,14 @@ fn main() {
     // or implied. If default "release" level of 3 is deemed unsuitable,
     // modify 'opt-level' in [profile.release] in Cargo.toml.
 
-    // This is required to run cargo test, but Lotus already has libblst.a
-    // linked in so including it here results in multiply defined symbols
-    // cc::Build::new()
-    //     .flag("-march=native")
-    //     .flag_if_supported("-mno-avx") // avoid costly transitions
-    //     .flag_if_supported("-Wno-unused-command-line-argument")
-    //     .files(&file_vec)
-    //     .compile("libblst.a");
+    // In order to avoid multiple definitions of the blst symbols in Lotus
+    // the flags here must batch what is in lotus_blst.go and blst.go.
+    cc::Build::new()
+        .flag("-O3")
+        .flag("-D__ADX__")
+        .flag_if_supported("-mno-avx") // avoid costly transitions
+        .files(&file_vec)
+        .compile("libblst.a");
 
     // native is faster but causes machine to machine incompatibility
     // .flag("-march=native")
