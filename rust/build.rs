@@ -57,28 +57,19 @@ fn main() {
 
     let mut file_vec = Vec::new();
 
-    let fil_blst_base_dir = match env::var("FIL_BLST_SRC_DIR") {
-        Ok(val) => PathBuf::from(val),
-        Err(_) => {
-            let fil_blst_path = PathBuf::from("fil-blst");
-            if fil_blst_path.exists() {
-                fil_blst_path
-            } else {
-                PathBuf::from("..")
-            }
-        }
-    };
-    let blst_base_dir = fil_blst_base_dir.join("blst");
+    // There are symlinks in the current directory to blst sources to make sure those sources are
+    // also bundled in the crate when published
+    let fil_blst_src_dir = PathBuf::from("fil-blst");
+    let blst_base_dir = PathBuf::from("blst");
     println!(
         "Using fil-blst source directory {:?}",
-        fil_blst_base_dir
+        fil_blst_src_dir
     );
     println!("Using       blst source directory {:?}", blst_base_dir);
 
     let c_src_dir = blst_base_dir.join("src");
     let build_dir = blst_base_dir.join("build");
     let binding_src_dir = blst_base_dir.join("bindings");
-    let fil_blst_src_dir = fil_blst_base_dir.join("src");
 
     file_vec.push(c_src_dir.join("server.c"));
     assembly(&mut file_vec, &build_dir);

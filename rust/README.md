@@ -7,11 +7,3 @@ Building
 --------
 
     cargo build
-
-
-Publishing the crate
---------------------
-
-You need to set the `FIL_BLST_SRC_DIR` to the root (absolute path) of the `fil-blst` checkout (not to the `rust` subdirectory).
-
-    FIL_BLST_SRC_DIR=${PWD}/.. cargo publish
