@@ -5,23 +5,25 @@ use std::path::Path;
 use std::path::PathBuf;
 
 #[cfg(all(target_env = "msvc", target_arch = "x86_64"))]
-fn assembly(file_vec: &mut Vec<PathBuf>, base_dir: &str) {
-    let files = glob::glob(&(base_dir.to_owned() + "win64/*-x86_64.asm")).expect("disaster");
+fn assembly(file_vec: &mut Vec<PathBuf>, base_dir: &Path) {
+    let glob_path = format!("{:?}/win64/*-x86_64.asm", base_dir);
+    let files = glob::glob(&glob_path).expect("disaster");
     for file in files {
         file_vec.push(file.unwrap());
     }
 }
 
 #[cfg(all(target_env = "msvc", target_arch = "aarch64"))]
-fn assembly(file_vec: &mut Vec<PathBuf>, base_dir: &str) {
-    let files = glob::glob(&(base_dir.to_owned() + "win64/*-armv8.asm")).expect("disaster");
+fn assembly(file_vec: &mut Vec<PathBuf>, base_dir: &Path) {
+    let glob_path = format!("{:?}/win64/*-armv8.asm", base_dir);
+    let files = glob::glob(&glob_path).expect("disaster");
     for file in files {
         file_vec.push(file.unwrap());
     }
 }
 
 #[cfg(all(target_pointer_width = "64", not(target_env = "msvc")))]
-fn assembly(file_vec: &mut Vec<PathBuf>, base_dir: &str) {
+fn assembly(file_vec: &mut Vec<PathBuf>, base_dir: &Path) {
     file_vec.push(Path::new(base_dir).join("assembly.S"))
 }
 
@@ -55,36 +57,35 @@ fn main() {
 
     let mut file_vec = Vec::new();
 
-    let _out_dir = env::var_os("OUT_DIR").unwrap();
-
     let lotus_blst_base_dir = match env::var("LOTUS_BLST_SRC_DIR") {
-        Ok(val) => val,
+        Ok(val) => PathBuf::from(val),
         Err(_) => {
-            if Path::new("lotus-blst").exists() {
-                "lotus-blst".to_string()
+            let lotus_blst_path = PathBuf::from("lotus-blst");
+            if lotus_blst_path.exists() {
+                lotus_blst_path
             } else {
-                "..".to_string()
+                PathBuf::from("..")
             }
         }
     };
-    let blst_base_dir = lotus_blst_base_dir.clone() + "/blst";
+    let blst_base_dir = lotus_blst_base_dir.join("blst");
     println!(
         "Using lotus-blst source directory {:?}",
         lotus_blst_base_dir
     );
     println!("Using       blst source directory {:?}", blst_base_dir);
 
-    let c_src_dir = blst_base_dir.clone() + "/src/";
-    let build_dir = blst_base_dir.clone() + "/build/";
-    let binding_src_dir = blst_base_dir + "/bindings/";
-    let lotus_blst_src_dir = lotus_blst_base_dir.clone() + "/src/";
+    let c_src_dir = blst_base_dir.join("src");
+    let build_dir = blst_base_dir.join("build");
+    let binding_src_dir = blst_base_dir.join("bindings");
+    let lotus_blst_src_dir = lotus_blst_base_dir.join("src");
 
-    file_vec.push(Path::new(&c_src_dir).join("server.c"));
+    file_vec.push(c_src_dir.join("server.c"));
     assembly(&mut file_vec, &build_dir);
 
     let mut cpp_file_vec = Vec::new();
-    cpp_file_vec.push(Path::new(&lotus_blst_src_dir).join("lotus_blst.cpp"));
-    cpp_file_vec.push(Path::new(&lotus_blst_src_dir).join("thread_pool.cpp"));
+    cpp_file_vec.push(lotus_blst_src_dir.join("lotus_blst.cpp"));
+    cpp_file_vec.push(lotus_blst_src_dir.join("thread_pool.cpp"));
 
     // Set CC environment variable to choose alternative C compiler.
     // Optimization level depends on whether or not --release is passed
@@ -117,7 +118,13 @@ fn main() {
         .compile("liblotusblst.a");
 
     let bindings = bindgen::Builder::default()
-        .header(binding_src_dir + "blst.h")
+        .header(
+            binding_src_dir
+                .join("blst.h")
+                .to_str()
+                .expect("path is valid utf-8")
+                .to_string(),
+        )
         .opaque_type("blst_pairing")
         .size_t_is_usize(true)
         .rustified_enum("BLST_ERROR")
