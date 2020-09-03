@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-#ifndef __LOTUS_BLST_H__
-#define __LOTUS_BLST_H__
+#ifndef __FIL_BLST_H__
+#define __FIL_BLST_H__
 
 #include "blst.h"
 
@@ -23,4 +23,4 @@ int verify_window_post_go(uint8_t *randomness, uint64_t sector_mask,
 }
 #endif  // __cplusplus
 
-#endif  // __LOTUS_BLST_H__
+#endif  // __FIL_BLST_H__

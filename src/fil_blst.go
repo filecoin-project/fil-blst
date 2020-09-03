@@ -4,7 +4,7 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-package lotusblst
+package filblst
 
 // -march=native is a little better since it uses sha-ni instructions. However,
 // using -D__ADX__ to maintain cross system compatibility.
@@ -12,7 +12,7 @@ package lotusblst
 // #cgo CFLAGS: -I${SRCDIR}/../blst/bindings -I${SRCDIR}/../blst/src -I${SRCDIR}/../blst/build -D__BLST_CGO__ -mno-avx -D__ADX__ -O3
 // #cgo CPPFLAGS: -I${SRCDIR}/../blst/bindings -I${SRCDIR}/../blst/src -I${SRCDIR}/../blst/build -D__BLST_CGO__ -mno-avx -D__ADX__ -O3
 // #cgo LDFLAGS: -L${SRCDIR}/../blst -lblst
-// #include <lotus_blst_go.h>
+// #include <fil_blst_go.h>
 import "C"
 import (
 	"fmt"

@@ -10,5 +10,5 @@ if [ ! -f blst/libblst.a ]; then
 fi
 
 g++ -Wall -g -O3 -march=native -Icpp -Iblst/bindings -Iblst/src -Isrc \
-    src/lotus_blst.cpp src/util.cpp src/thread_pool.cpp test/main.cpp \
+    src/fil_blst.cpp src/util.cpp src/thread_pool.cpp test/main.cpp \
     blst/libblst.a -lpthread 

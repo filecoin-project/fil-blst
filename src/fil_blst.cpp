@@ -13,8 +13,8 @@
 #include <xmmintrin.h>
 
 #include "thread_pool.hpp"
-#include "lotus_blst.h"
-#include "lotus_blst_internal.hpp"
+#include "fil_blst.h"
+#include "fil_blst_internal.hpp"
 #include "util.hpp"
 
 static const size_t  SCALAR_SIZE         = 256;

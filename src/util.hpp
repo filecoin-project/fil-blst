@@ -7,7 +7,7 @@
 
 #include <vector>
 #include <random>
-#include "lotus_blst_internal.hpp"
+#include "fil_blst_internal.hpp"
 
 void print_blst_scalar(const blst_scalar* s, const char* name);
 void print_blst_fr(const blst_fr *p, const char* name);

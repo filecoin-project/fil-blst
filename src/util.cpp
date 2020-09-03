@@ -7,7 +7,7 @@
 #include <cstring>
 
 #include "util.hpp"
-#include "lotus_blst.h"
+#include "fil_blst.h"
 
 static void print_value(unsigned int *value, size_t n, const char* name) {
     if (name != NULL)
