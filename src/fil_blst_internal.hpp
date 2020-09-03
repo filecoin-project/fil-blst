@@ -2,8 +2,8 @@
 // Licensed under the Apache License, Version 2.0, see LICENSE for details.
 // SPDX-License-Identifier: Apache-2.0
 
-#ifndef __LOTUS_BLST_INTERNAL_HPP__
-#define __LOTUS_BLST_INTERNAL_HPP__
+#ifndef __FIL_BLST_INTERNAL_HPP__
+#define __FIL_BLST_INTERNAL_HPP__
 
 #include "blst.h"
 
@@ -91,4 +91,4 @@ bool verify_batch_proof_inner(PROOF *proofs, size_t num_proofs,
                               blst_scalar *rand_z, size_t nbits);
 
 
-#endif  // __LOTUS_BLST_INTERNAL_H__
+#endif  // __FIL_BLST_INTERNAL_H__

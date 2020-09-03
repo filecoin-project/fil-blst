@@ -1,5 +1,6 @@
-# lotus-blst (Lotus blast)
-A library to accelerate snark verification for the Filecoin network using the blst BLS12-381 performance library
+# fil-blst (Filecoin blast)
+
+A library to accelerate SNARK verification for the Filecoin network using the blst BLS12-381 performance library.
 
 # Building
 

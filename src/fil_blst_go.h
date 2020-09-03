@@ -4,8 +4,8 @@
  * SPDX-License-Identifier: Apache-2.0
  */
 
-#ifndef __LOTUS_BLST_GO_HPP__
-#define __LOTUS_BLST_GO_HPP__
+#ifndef __FIL_BLST_GO_HPP__
+#define __FIL_BLST_GO_HPP__
 
 #include <stdint.h>
 #include <stddef.h>
@@ -20,4 +20,4 @@ int verify_window_post_go(uint8_t *randomness, uint64_t sector_mask,
                           uint8_t *proof, size_t num_proofs,
                           char *vkfile);
 
-#endif  // __LOTUS_BLST_GO_HPP__
+#endif  // __FIL_BLST_GO_HPP__

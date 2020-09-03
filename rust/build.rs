@@ -57,35 +57,35 @@ fn main() {
 
     let mut file_vec = Vec::new();
 
-    let lotus_blst_base_dir = match env::var("LOTUS_BLST_SRC_DIR") {
+    let fil_blst_base_dir = match env::var("FIL_BLST_SRC_DIR") {
         Ok(val) => PathBuf::from(val),
         Err(_) => {
-            let lotus_blst_path = PathBuf::from("lotus-blst");
-            if lotus_blst_path.exists() {
-                lotus_blst_path
+            let fil_blst_path = PathBuf::from("fil-blst");
+            if fil_blst_path.exists() {
+                fil_blst_path
             } else {
                 PathBuf::from("..")
             }
         }
     };
-    let blst_base_dir = lotus_blst_base_dir.join("blst");
+    let blst_base_dir = fil_blst_base_dir.join("blst");
     println!(
-        "Using lotus-blst source directory {:?}",
-        lotus_blst_base_dir
+        "Using fil-blst source directory {:?}",
+        fil_blst_base_dir
     );
     println!("Using       blst source directory {:?}", blst_base_dir);
 
     let c_src_dir = blst_base_dir.join("src");
     let build_dir = blst_base_dir.join("build");
     let binding_src_dir = blst_base_dir.join("bindings");
-    let lotus_blst_src_dir = lotus_blst_base_dir.join("src");
+    let fil_blst_src_dir = fil_blst_base_dir.join("src");
 
     file_vec.push(c_src_dir.join("server.c"));
     assembly(&mut file_vec, &build_dir);
 
     let mut cpp_file_vec = Vec::new();
-    cpp_file_vec.push(lotus_blst_src_dir.join("lotus_blst.cpp"));
-    cpp_file_vec.push(lotus_blst_src_dir.join("thread_pool.cpp"));
+    cpp_file_vec.push(fil_blst_src_dir.join("fil_blst.cpp"));
+    cpp_file_vec.push(fil_blst_src_dir.join("thread_pool.cpp"));
 
     // Set CC environment variable to choose alternative C compiler.
     // Optimization level depends on whether or not --release is passed
@@ -101,7 +101,7 @@ fn main() {
     }
     cc.files(&file_vec).compile("libblst.a");
 
-    // Build lotus-blst
+    // Build fil-blst
     let mut cpp = cc::Build::new();
     if is_adx() {
         cpp.define("__ADX__", None);
@@ -115,7 +115,7 @@ fn main() {
     cpp.cpp(true)
         .include(&binding_src_dir)
         .files(&cpp_file_vec)
-        .compile("liblotusblst.a");
+        .compile("libfilblst.a");
 
     let bindings = bindgen::Builder::default()
         .header(

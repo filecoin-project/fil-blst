@@ -1,11 +1,11 @@
 [package]
-name = "lotus_blst"
+name = "fil-blst"
 version = "0.1.0"
 authors = ["sean-sn <sean@supranational.net>"]
 edition = "2018"
 license = "Apache-2.0"
-description = "Zero knowledge related computations on top of blst BLS12-381 performance library"
-repository = "https://github.com/supranational/zkblst"
+description = "A library to accelerate SNARK verification for the Filecoin network using the blst BLS12-381 performance library."
+repository = "https://github.com/filecoin-project/fil-blst"
 readme = "README.md"
 
 [build-dependencies]

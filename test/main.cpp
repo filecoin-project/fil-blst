@@ -8,7 +8,7 @@
 #include <string.h>
 #include <chrono>
 
-#include "lotus_blst.h"
+#include "fil_blst.h"
 #include "util.hpp"
 
 typedef std::chrono::high_resolution_clock Clock;
