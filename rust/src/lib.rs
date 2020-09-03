@@ -10,17 +10,21 @@ include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
 use fff::PrimeField;
 use groupy::EncodedPoint;
-use paired::bls12_381::{
-    Fq, Fr, G1Affine, G1Uncompressed, G2Affine, G2Uncompressed, Bls12,
-};
+use paired::bls12_381::{Bls12, Fq, Fr, G1Affine, G1Uncompressed, G2Affine, G2Uncompressed};
 use std::path::Path;
 
 extern "C" {
-//     //pub fn print_blst_fr(fr: *const blst_fr);
-    pub fn verify_batch_proof_c(proof_bytes: *const u8, num_proofs: usize, 
-                               public_inputs: *const blst_fr, num_inputs: usize,
-                               rand_z: *const blst_scalar, nbits: usize,
-                               vk_path: *const u8, vk_len: usize) -> bool;
+    //     //pub fn print_blst_fr(fr: *const blst_fr);
+    pub fn verify_batch_proof_c(
+        proof_bytes: *const u8,
+        num_proofs: usize,
+        public_inputs: *const blst_fr,
+        num_inputs: usize,
+        rand_z: *const blst_scalar,
+        nbits: usize,
+        vk_path: *const u8,
+        vk_len: usize,
+    ) -> bool;
 }
 
 impl From<Fr> for blst_fr {
@@ -40,10 +44,7 @@ impl From<Fq> for blst_fp {
     fn from(fq: Fq) -> blst_fp {
         let mut fp = std::mem::MaybeUninit::<blst_fp>::uninit();
         unsafe {
-            blst_fp_from_uint64(
-                fp.as_mut_ptr(),
-                fq.into_repr().as_ref().as_ptr(),
-            );
+            blst_fp_from_uint64(fp.as_mut_ptr(), fq.into_repr().as_ref().as_ptr());
             fp.assume_init()
         }
     }
@@ -97,20 +98,33 @@ pub fn scalar_from_u64(limbs: &[u64; 4]) -> blst_scalar {
     }
 }
 
-pub fn verify_batch_proof(proof_vec: &[u8], num_proofs: usize, 
-                          public_inputs: &[blst_fr], num_inputs: usize,
-                          rand_z: &[blst_scalar], nbits: usize,
-                          vk_path: &Path) -> bool {
-    let s = vk_path.to_str().expect("Path is expected to be valid UTF-8").to_string();
+pub fn verify_batch_proof(
+    proof_vec: &[u8],
+    num_proofs: usize,
+    public_inputs: &[blst_fr],
+    num_inputs: usize,
+    rand_z: &[blst_scalar],
+    nbits: usize,
+    vk_path: &Path,
+) -> bool {
+    let s = vk_path
+        .to_str()
+        .expect("Path is expected to be valid UTF-8")
+        .to_string();
     let vk_bytes = s.into_bytes();
     unsafe {
-        verify_batch_proof_c(&(proof_vec[0]), num_proofs,
-                             public_inputs.as_ptr(), num_inputs,
-                             &(rand_z[0]), nbits,
-                             &(vk_bytes[0]), vk_bytes.len())
+        verify_batch_proof_c(
+            &(proof_vec[0]),
+            num_proofs,
+            public_inputs.as_ptr(),
+            num_inputs,
+            &(rand_z[0]),
+            nbits,
+            &(vk_bytes[0]),
+            vk_bytes.len(),
+        )
     }
 }
-
 
 pub fn print_bytes(bytes: &[u8], name: &str) {
     print!("{} ", name);
@@ -131,8 +145,7 @@ mod tests {
     #[test]
     fn it_works() {
         unsafe {
-            let mut bp1 =
-                std::mem::MaybeUninit::<blst_p1>::zeroed().assume_init();
+            let mut bp1 = std::mem::MaybeUninit::<blst_p1>::zeroed().assume_init();
             //let mut bp1_aff = std::mem::MaybeUninit::<blst_p1_affine>::zeroed().assume_init();
 
             blst_p1_add_or_double_affine(&mut bp1, &bp1, &BLS12_381_G1);
@@ -159,7 +172,7 @@ mod tests {
             // let mut frB_bytes = [0u8; 32];
             // blst_bendian_from_fr(frX_bytes.as_mut_ptr(), &frB);
             // print_bytes(&frB_bytes, "frB");
-            
+
             let fqX = Fq::one();
             println!("fqX {:?}", fqX);
 
@@ -192,10 +205,7 @@ mod tests {
             // Use uncompressed
 
             let mut g1_gen_bytes_uncomp = [0u8; 96];
-            blst_p1_affine_serialize(
-                g1_gen_bytes_uncomp.as_mut_ptr(),
-                &BLS12_381_G1,
-            );
+            blst_p1_affine_serialize(g1_gen_bytes_uncomp.as_mut_ptr(), &BLS12_381_G1);
             print_bytes(&g1_gen_bytes_uncomp, "G1_Generator");
 
             let mut g1_gen_z_bytes_uncomp = G1Uncompressed::empty();
@@ -204,21 +214,14 @@ mod tests {
                 .copy_from_slice(&g1_gen_bytes_uncomp);
             println!("g1_gen_z_bytes_uncomp {:?}", g1_gen_z_bytes_uncomp);
 
-            let g1_gen_z_uncomp =
-                g1_gen_z_bytes_uncomp.into_affine_unchecked().unwrap();
+            let g1_gen_z_uncomp = g1_gen_z_bytes_uncomp.into_affine_unchecked().unwrap();
 
             let g1_gen_b_uncomp = blst_p1_affine::from(g1_gen_z_uncomp);
             let mut g1_gen_bytes_uncomp2 = [0u8; 96];
-            blst_p1_affine_serialize(
-                g1_gen_bytes_uncomp2.as_mut_ptr(),
-                &g1_gen_b_uncomp,
-            );
+            blst_p1_affine_serialize(g1_gen_bytes_uncomp2.as_mut_ptr(), &g1_gen_b_uncomp);
             print_bytes(&g1_gen_bytes_uncomp2, "G1_Generator");
 
-            assert_eq!(
-                &g1_gen_bytes_uncomp[0..96],
-                &g1_gen_bytes_uncomp2[0..96]
-            );
+            assert_eq!(&g1_gen_bytes_uncomp[0..96], &g1_gen_bytes_uncomp2[0..96]);
         }
     }
 }

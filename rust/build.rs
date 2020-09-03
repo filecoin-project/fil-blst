@@ -6,8 +6,7 @@ use std::path::PathBuf;
 
 #[cfg(all(target_env = "msvc", target_arch = "x86_64"))]
 fn assembly(file_vec: &mut Vec<PathBuf>, base_dir: &str) {
-    let files = glob::glob(&(base_dir.to_owned() + "win64/*-x86_64.asm"))
-        .expect("disaster");
+    let files = glob::glob(&(base_dir.to_owned() + "win64/*-x86_64.asm")).expect("disaster");
     for file in files {
         file_vec.push(file.unwrap());
     }
@@ -15,8 +14,7 @@ fn assembly(file_vec: &mut Vec<PathBuf>, base_dir: &str) {
 
 #[cfg(all(target_env = "msvc", target_arch = "aarch64"))]
 fn assembly(file_vec: &mut Vec<PathBuf>, base_dir: &str) {
-    let files = glob::glob(&(base_dir.to_owned() + "win64/*-armv8.asm"))
-        .expect("disaster");
+    let files = glob::glob(&(base_dir.to_owned() + "win64/*-armv8.asm")).expect("disaster");
     for file in files {
         file_vec.push(file.unwrap());
     }
@@ -70,7 +68,10 @@ fn main() {
         }
     };
     let blst_base_dir = lotus_blst_base_dir.clone() + "/blst";
-    println!("Using lotus-blst source directory {:?}", lotus_blst_base_dir);
+    println!(
+        "Using lotus-blst source directory {:?}",
+        lotus_blst_base_dir
+    );
     println!("Using       blst source directory {:?}", blst_base_dir);
 
     let c_src_dir = blst_base_dir.clone() + "/src/";
