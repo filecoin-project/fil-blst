@@ -108,6 +108,8 @@ fn main() {
     if !cfg!(debug_assertions) {
         cpp.opt_level(3); // Must be consistent with Go build
     }
+    // Needed for macOS
+    cpp.flag_if_supported("-std=gnu++11");
     cpp.cpp(true)
         .include(&binding_src_dir)
         .files(&cpp_file_vec)
