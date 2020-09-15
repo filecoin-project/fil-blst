@@ -34,7 +34,12 @@ static const blst_p1 G1_INFINITY         = {{ 0 }, { 0 }, { 0 }};
 #endif
 
 typedef std::chrono::high_resolution_clock Clock;
+// Thread pool for high throughput work
 static ThreadPool *da_pool = NULL;
+// Dedicated pool for proof verification. A separate pool is required to
+// avoid deadlock between the outer macro threads and the inner parmaps.
+static ThreadPool *verify_pool = NULL;
+const int VERIFY_WORK_THREADS = 4;
 
 extern "C" {
   void blst_sha256_block(unsigned int *h, const void *inp, size_t blocks);
@@ -45,11 +50,15 @@ extern "C" {
 struct Config {
   std::map<std::string, VERIFYING_KEY *> vk_cache;
   Config() {
+    verify_pool = new ThreadPool(VERIFY_WORK_THREADS);
     threadpool_init(0);
   }
   ~Config() {
     if (da_pool != NULL) {
       delete da_pool;
+    }
+    if (verify_pool != NULL) {
+      delete verify_pool;
     }
     for (auto it = vk_cache.begin(); it != vk_cache.end(); it++) {
       delete it->second;
@@ -66,9 +75,8 @@ void threadpool_init(size_t thread_count) {
   if (thread_count == 0 || thread_count > std::thread::hardware_concurrency()) {
     thread_count = std::thread::hardware_concurrency();
   }
-  // We currently require a minimum of 4 threads
-  if (thread_count < 4) {
-    thread_count = 4;
+  if (thread_count < 1) {
+    thread_count = 1;
   }
   da_pool = new ThreadPool(thread_count);
 }
@@ -288,8 +296,7 @@ BLST_ERROR read_vk_file(VERIFYING_KEY** ret, std::string filename) {
     *ret = search->second;
     return BLST_SUCCESS;
   }
-  VERIFYING_KEY* vk = new VERIFYING_KEY();
-  *ret = vk;
+  std::unique_ptr<VERIFYING_KEY> vk(new VERIFYING_KEY());
   
   std::ifstream vk_file;
   vk_file.open(filename, std::ios::binary | std::ios::in);
@@ -310,26 +317,44 @@ BLST_ERROR read_vk_file(VERIFYING_KEY** ret, std::string filename) {
   vk_file.read((char*) g1_bytes, sizeof(g1_bytes));
   err = blst_p1_deserialize(&vk->alpha_g1, g1_bytes);
   if (err != BLST_SUCCESS) return err;
+  if (!blst_p1_affine_in_g1(&vk->alpha_g1)) {
+    return BLST_POINT_NOT_IN_GROUP;
+  }
 
   vk_file.read((char*) g1_bytes, sizeof(g1_bytes));
   err = blst_p1_deserialize(&vk->beta_g1, g1_bytes);
   if (err != BLST_SUCCESS) return err;
+  if (!blst_p1_affine_in_g1(&vk->beta_g1)) {
+    return BLST_POINT_NOT_IN_GROUP;
+  }
 
   vk_file.read((char*) g2_bytes, sizeof(g2_bytes));
   err = blst_p2_deserialize(&vk->beta_g2, g2_bytes);
   if (err != BLST_SUCCESS) return err;
+  if (!blst_p2_affine_in_g2(&vk->beta_g2)) {
+    return BLST_POINT_NOT_IN_GROUP;
+  }
 
   vk_file.read((char*) g2_bytes, sizeof(g2_bytes));
   err = blst_p2_deserialize(&vk->gamma_g2, g2_bytes);
   if (err != BLST_SUCCESS) return err;
+  if (!blst_p2_affine_in_g2(&vk->gamma_g2)) {
+    return BLST_POINT_NOT_IN_GROUP;
+  }
 
   vk_file.read((char*) g1_bytes, sizeof(g1_bytes));
   err = blst_p1_deserialize(&vk->delta_g1, g1_bytes);
   if (err != BLST_SUCCESS) return err;
+  if (!blst_p1_affine_in_g1(&vk->delta_g1)) {
+    return BLST_POINT_NOT_IN_GROUP;
+  }
 
   vk_file.read((char*) g2_bytes, sizeof(g2_bytes));
   err = blst_p2_deserialize(&vk->delta_g2, g2_bytes);
   if (err != BLST_SUCCESS) return err;
+  if (!blst_p2_affine_in_g2(&vk->delta_g2)) {
+    return BLST_POINT_NOT_IN_GROUP;
+  }
 
   vk_file.read((char*) &ic_len_rd, sizeof(ic_len_rd));
   ic_len = ((ic_len_rd >> 24) & 0xff)       |
@@ -344,6 +369,9 @@ BLST_ERROR read_vk_file(VERIFYING_KEY** ret, std::string filename) {
     vk_file.read((char*) g1_bytes, sizeof(g1_bytes));
     err = blst_p1_deserialize(&cur_ic_aff, g1_bytes);
     if (err != BLST_SUCCESS) return err;
+    if (!blst_p1_affine_in_g1(&cur_ic_aff)) {
+      return BLST_POINT_NOT_IN_GROUP;
+    }
     vk->ic.push_back(cur_ic_aff);
   }
 
@@ -377,7 +405,8 @@ BLST_ERROR read_vk_file(VERIFYING_KEY** ret, std::string filename) {
   vk->multiscalar = precompute_fixed_window(vk->ic, WINDOW_SIZE);
 
   if (err == BLST_SUCCESS) {
-    zkconfig.vk_cache[filename] = vk;
+    *ret = vk.get();
+    zkconfig.vk_cache[filename] = vk.release();
   }
   return err;
 }
@@ -462,10 +491,9 @@ bool verify_batch_proof_inner(PROOF *proofs, size_t num_proofs,
   const int ACC_AB_THR   = 1;
   const int Y_THR        = 2;
   const int ML_G_THR     = 3;
-  const int WORK_THREADS = 4;
   
-  std::vector<std::mutex> thread_complete(WORK_THREADS);
-  for (size_t i = 0; i < WORK_THREADS; i++) {
+  std::vector<std::mutex> thread_complete(VERIFY_WORK_THREADS);
+  for (size_t i = 0; i < VERIFY_WORK_THREADS; i++) {
     thread_complete[i].lock();
   }
 
@@ -479,9 +507,9 @@ bool verify_batch_proof_inner(PROOF *proofs, size_t num_proofs,
 
   // THREAD 3
   blst_fp12 ml_g;
-  da_pool->schedule([num_proofs, num_inputs, &accum_y,
-                       &vk, &public_inputs, &rand_z, &ml_g,
-                       &thread_complete, WORK_THREADS]() {
+  verify_pool->schedule([num_proofs, num_inputs, &accum_y,
+                         &vk, &public_inputs, &rand_z, &ml_g,
+                         &thread_complete]() {
     auto scalar_getter = [num_proofs, num_inputs,
                           &accum_y, &rand_z, &public_inputs]
       (blst_scalar *s, size_t idx) {
@@ -522,9 +550,9 @@ bool verify_batch_proof_inner(PROOF *proofs, size_t num_proofs,
 
   // THREAD 1
   blst_fp12 ml_d;
-  da_pool->schedule([num_proofs, nbits,
-                       &proofs, &rand_z, &vk, &thread_complete,
-                       &ml_d]() {
+  verify_pool->schedule([num_proofs, nbits,
+                         &proofs, &rand_z, &vk, &thread_complete,
+                         &ml_d]() {
     blst_p1 acc_d;
     std::vector<blst_p1_affine> points;
     points.resize(num_proofs);
@@ -546,10 +574,10 @@ bool verify_batch_proof_inner(PROOF *proofs, size_t num_proofs,
   
   // THREAD 2
   blst_fp12 acc_ab;
-  da_pool->schedule([num_proofs, nbits,
-                       &vk, &proofs, &rand_z,
-                       &acc_ab,
-                       &thread_complete, WORK_THREADS]() {
+  verify_pool->schedule([num_proofs, nbits,
+                         &vk, &proofs, &rand_z,
+                         &acc_ab,
+                         &thread_complete]() {
     std::vector<blst_fp12> accum_ab_mls;
     accum_ab_mls.resize(num_proofs);
     da_pool->parMap(num_proofs, [num_proofs, &proofs, &rand_z,
@@ -567,7 +595,7 @@ bool verify_batch_proof_inner(PROOF *proofs, size_t num_proofs,
       blst_p2_to_affine(&cur_neg_b_aff, &cur_neg_b);
       
       blst_miller_loop(&accum_ab_mls[j], &cur_neg_b_aff, &acc_a_aff);
-    }, da_pool->size() - WORK_THREADS);
+    }, da_pool->size() - VERIFY_WORK_THREADS);
 
     // accum_ab = mul_j(ml((zj*proof_aj), -proof_bj))
     memcpy(&acc_ab, &accum_ab_mls[0], sizeof(acc_ab));
@@ -580,7 +608,7 @@ bool verify_batch_proof_inner(PROOF *proofs, size_t num_proofs,
 
   // THREAD 0
   blst_fp12 y;
-  da_pool->schedule([&y, &accum_y, &vk, &thread_complete]() {
+  verify_pool->schedule([&y, &accum_y, &vk, &thread_complete]() {
     // -accum_y
     blst_fr accum_y_neg;
     blst_fr_cneg(&accum_y_neg, &accum_y, 1);
@@ -615,7 +643,6 @@ bool verify_batch_proof_inner(PROOF *proofs, size_t num_proofs,
 // - nbits         - bit size of the scalars. all unused bits must be zero.
 // - vk_path       - path to the verifying key in the file system
 // - vk_len        - length of vk_path, in bytes, not including null termination
-// TODO: change public_inputs to scalar
 bool verify_batch_proof_c(uint8_t *proof_bytes, size_t num_proofs,
                           blst_scalar *public_inputs, size_t num_inputs,
                           blst_scalar *rand_z, size_t nbits,
@@ -675,7 +702,9 @@ bool verify_batch_proof_c(uint8_t *proof_bytes, size_t num_proofs,
   
   VERIFYING_KEY *vk;
   std::string vk_str((const char *)vk_path, vk_len);
-  read_vk_file(&vk, vk_str);
+  if (read_vk_file(&vk, vk_str) != BLST_SUCCESS) {
+    return false;
+  }
   
   int res = verify_batch_proof_inner(proofs.data(), num_proofs,
                                      public_inputs, num_inputs,
@@ -769,7 +798,9 @@ int verify_window_post_go(uint8_t *randomness, uint64_t sector_mask,
   uint64_t inputs_size = num_sectors * (challenge_count + 1);
 
   VERIFYING_KEY *vk;
-  read_vk_file(&vk, std::string(vkfile));
+  if (read_vk_file(&vk, std::string(vkfile)) != BLST_SUCCESS) {
+    return false;
+  }
   
   bool res = verify_batch_proof_ind(&proof, 1, NULL, &getter, inputs_size, *vk);
   return res;

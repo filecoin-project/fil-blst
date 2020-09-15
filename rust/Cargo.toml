@@ -16,7 +16,6 @@ bindgen = "0.54.0"
 glob = "0.3.0"
 
 [dependencies]
-#paired = "0.19.1"
 paired = "0.20.0"
 groupy = "0.3.1"
 fff = { version = "0.2.2", features = ["derive"] }
