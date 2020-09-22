@@ -8,6 +8,8 @@
 
 include!(concat!(env!("OUT_DIR"), "/bindings.rs"));
 
+mod verifier;
+
 use fff::PrimeField;
 use groupy::EncodedPoint;
 use paired::bls12_381::{Bls12, Fq, Fr, G1Affine, G1Uncompressed, G2Affine, G2Uncompressed};
