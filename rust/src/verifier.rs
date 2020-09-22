@@ -180,7 +180,7 @@ fn make_fr_safe_u64(i: u64) -> u64 {
 
 /// Precompute tables for fixed bases
 fn precompute_fixed_window(
-    points: Vec<blst_p1_affine>,
+    points: &[blst_p1_affine],
     window_size: usize,
 ) -> MultiscalarPrecompOwned {
     let table_entries = (1 << window_size) - 1;
@@ -190,14 +190,14 @@ fn precompute_fixed_window(
         .into_par_iter()
         .map(|point| {
             let mut table = vec![blst_p1_affine::default(); table_entries];
-            table[0] = point;
+            table[0] = *point;
 
             let mut curPrecompPoint = blst_p1::default();
-            unsafe { blst_p1_from_affine(&mut curPrecompPoint, &point) };
+            unsafe { blst_p1_from_affine(&mut curPrecompPoint, &*point) };
 
             for entry in table.iter_mut().skip(1) {
                 unsafe {
-                    blst_p1_add_or_double_affine(&mut curPrecompPoint, &curPrecompPoint, &point);
+                    blst_p1_add_or_double_affine(&mut curPrecompPoint, &curPrecompPoint, &*point);
                     blst_p1_to_affine(entry, &curPrecompPoint);
                 }
             }
@@ -444,34 +444,69 @@ fn read_vk_file(filename: &str) -> Result<Arc<VerifyingKey>> {
     }
     drop(vk_file);
 
-    // blst_miller_loop(&vk->alpha_g1_beta_g2, &vk->beta_g2, &vk->alpha_g1);
-    // blst_final_exp(&vk->alpha_g1_beta_g2, &vk->alpha_g1_beta_g2);
-    // blst_precompute_lines(vk->delta_q_lines, &vk->delta_g2);
-    // blst_precompute_lines(vk->gamma_q_lines, &vk->gamma_g2);
+    let mut alpha_g1_beta_g2 = blst_fp12::default();
+    unsafe {
+        blst_miller_loop(&mut alpha_g1_beta_g2, &beta_g2, &alpha_g1);
+        blst_final_exp(&mut alpha_g1_beta_g2, &alpha_g1_beta_g2);
+    }
+    let mut delta_q_lines = [blst_fp6::default(); 68];
+    unsafe {
+        blst_precompute_lines(delta_q_lines.as_mut_ptr(), &delta_g2);
+    }
+    let mut gamma_q_lines = [blst_fp6::default(); 68];
+    unsafe {
+        blst_precompute_lines(gamma_q_lines.as_mut_ptr(), &gamma_g2);
+    }
 
-    // blst_p2        neg_delta_g2;
-    // blst_p2_affine neg_delta_g2_aff;
-    // blst_p2_from_affine(&neg_delta_g2, &vk->delta_g2);
-    // blst_p2_cneg(&neg_delta_g2, 1);
-    // blst_p2_to_affine(&neg_delta_g2_aff, &neg_delta_g2);
-    // blst_precompute_lines(vk->neg_delta_q_lines, &neg_delta_g2_aff);
+    let mut neg_delta_g2 = blst_p2::default();
+    let mut neg_delta_g2_aff = blst_p2_affine::default();
+    unsafe {
+        blst_p2_from_affine(&mut neg_delta_g2, &delta_g2);
+        blst_p2_cneg(&mut neg_delta_g2, 1);
+        blst_p2_to_affine(&mut neg_delta_g2_aff, &neg_delta_g2);
+    }
+    let mut neg_delta_q_lines = [blst_fp6::default(); 68];
+    unsafe {
+        blst_precompute_lines(neg_delta_q_lines.as_mut_ptr(), &neg_delta_g2_aff);
+    }
 
-    // blst_p2        neg_gamma_g2;
-    // blst_p2_affine neg_gamma_g2_aff;
-    // blst_p2_from_affine(&neg_gamma_g2, &vk->gamma_g2);
-    // blst_p2_cneg(&neg_gamma_g2, 1);
-    // blst_p2_to_affine(&neg_gamma_g2_aff, &neg_gamma_g2);
-    // blst_precompute_lines(vk->neg_gamma_q_lines, &neg_gamma_g2_aff);
+    let mut neg_gamma_g2 = blst_p2::default();
+    let mut neg_gamma_g2_aff = blst_p2_affine::default();
+    unsafe {
+        blst_p2_from_affine(&mut neg_gamma_g2, &gamma_g2);
+        blst_p2_cneg(&mut neg_gamma_g2, 1);
+        blst_p2_to_affine(&mut neg_gamma_g2_aff, &neg_gamma_g2);
+    }
+    let mut neg_gamma_q_lines = [blst_fp6::default(); 68];
+    unsafe {
+        blst_precompute_lines(neg_gamma_q_lines.as_mut_ptr(), &neg_gamma_g2_aff);
+    }
 
-    // const size_t WINDOW_SIZE   = 8;
-    // vk->multiscalar = precompute_fixed_window(vk->ic, WINDOW_SIZE);
+    const WINDOW_SIZE: usize = 8;
+    let multiscalar = precompute_fixed_window(&ic, WINDOW_SIZE);
 
-    // if (err == BLST_SUCCESS) {
-    //   zkconfig.vk_cache[filename] = vk;
-    // }
-    // return err;
+    let vk = Arc::new(VerifyingKey {
+        alpha_g1,
+        beta_g1,
+        beta_g2,
+        gamma_g2,
+        delta_g1,
+        delta_g2,
+        ic,
+        alpha_g1_beta_g2,
+        delta_q_lines,
+        gamma_q_lines,
+        neg_delta_q_lines,
+        neg_gamma_q_lines,
+        multiscalar,
+    });
+    ZK_CONFIG
+        .vk_cache
+        .write()
+        .unwrap()
+        .insert(filename.to_string(), vk.clone());
 
-    todo!()
+    Ok(vk)
 }
 
 // // Verify batch proofs individually
