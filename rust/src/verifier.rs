@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 use std::io::Read;
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, RwLock};
+use std::sync::{Arc, Mutex, RwLock};
 
 use anyhow::{ensure, Context, Result};
 use blst::*;
@@ -130,6 +130,13 @@ impl MultiscalarPrecomp for MultiscalarPrecompRef<'_> {
             tables: &self.tables[idx..],
         }
     }
+}
+
+#[derive(Debug)]
+struct Proof {
+    a_g1: blst_p1_affine,
+    b_g2: blst_p2_affine,
+    c_g1: blst_p1_affine,
 }
 
 lazy_static! {
@@ -285,17 +292,14 @@ fn prefetch<T>(p: *const T) {
 
 // Perform a threaded multiscalar multiplication and accumulation
 // - k or getter should be non-null
-fn par_multiscalar<F>(
+fn par_multiscalar(
     max_threads: usize,
     result: &mut blst_p1,
-    k: Option<&[blst_scalar]>,
-    getter: F,
+    k: &PublicInputs<'_>,
     precomp_table: &dyn MultiscalarPrecomp,
     num_points: usize,
     nbits: usize,
-) where
-    F: Fn(u64) -> blst_scalar + Sync + Send,
-{
+) {
     // The granularity of work, in points. When a thread gets work it will
     // gather chunk_size points, perform muliscalar on them, and accumulate
     // the result. This is more efficient than evenly dividing the work among
@@ -338,15 +342,14 @@ fn par_multiscalar<F>(
                     }
                     let num_items = end_idx - start_idx;
 
-                    let scalars = if let Some(k) = k {
-                        &k[start_idx..]
-                    } else {
-                        {
+                    let scalars = match k {
+                        PublicInputs::Slice(ref s) => &s[start_idx..],
+                        PublicInputs::Getter(ref getter) => {
                             for i in start_idx..end_idx {
-                                scalar_storage[i - start_idx] = getter(i as u64);
+                                scalar_storage[i - start_idx] = getter(i);
                             }
+                            &scalar_storage
                         }
-                        &scalar_storage
                     };
                     let subset = precomp_table.at_point(start_idx);
                     let mut acc = blst_p1::default();
@@ -509,64 +512,115 @@ fn read_vk_file(filename: &str) -> Result<Arc<VerifyingKey>> {
     Ok(vk)
 }
 
-// // Verify batch proofs individually
-// static bool verify_batch_proof_ind(PROOF *proofs, size_t num_proofs,
-//                                    blst_scalar *public_inputs,
-//                                    ScalarGetter *getter,
-//                                    size_t num_inputs,
-//                                    VERIFYING_KEY& vk) {
-//   if ((num_inputs + 1) != vk.ic.size()) {
-//     return false;
-//   }
+enum PublicInputs<'a> {
+    Slice(&'a [blst_scalar]),
+    Getter(Box<dyn Fn(usize) -> blst_scalar + Sync + Send>),
+}
 
-//   bool result(true);
-//   for (uint64_t j = 0; j < num_proofs; ++j) {
-//     // Start the two independent miller loops
-//     blst_fp12 ml_a_b;
-//     blst_fp12 ml_all;
-//     std::vector<std::mutex> thread_complete(2);
-//     for (size_t i = 0; i < 2; i++) {
-//       thread_complete[i].lock();
-//     }
-//     da_pool->schedule([j, &ml_a_b, &proofs, &thread_complete]() {
-//       blst_miller_loop(&ml_a_b, &proofs[j].b_g2, &proofs[j].a_g1);
-//       thread_complete[0].unlock();
-//     });
-//     da_pool->schedule([j, &ml_all, &vk, &proofs, &thread_complete]() {
-//       blst_miller_loop_lines(&ml_all, vk.neg_delta_q_lines, &proofs[j].c_g1);
-//       thread_complete[1].unlock();
-//     });
+impl<'a> PublicInputs<'a> {
+    pub fn get(&self, i: usize) -> blst_scalar {
+        match self {
+            PublicInputs::Slice(inputs) => inputs[i],
+            PublicInputs::Getter(f) => f(i),
+        }
+    }
+}
 
-//     // Multiscalar
-//     blst_scalar *scalars_addr = NULL;
-//     if (public_inputs != NULL) {
-//       scalars_addr = &public_inputs[j * num_inputs];
-//     }
-//     blst_p1 acc;
-//     MultiscalarPrecomp subset = vk.multiscalar->at_point(1);
-//     par_multiscalar(da_pool->size(), &acc,
-//                     scalars_addr, getter,
-//                     &subset, num_inputs, 256);
-//     blst_p1_add_or_double_affine(&acc, &acc, &vk.ic[0]);
-//     blst_p1_affine acc_aff;
-//     blst_p1_to_affine(&acc_aff, &acc);
+/// Verify batch proofs individually
+fn verify_batch_proof_ind<F>(
+    proofs: &[Proof],
+    public_inputs: PublicInputs<'_>,
+    num_inputs: usize,
+    vk: &VerifyingKey,
+) -> bool
+where
+    F: Fn(u64) -> blst_scalar + Sync + Send,
+{
+    if (num_inputs + 1) != vk.ic.len() {
+        return false;
+    }
 
-//     // acc miller loop
-//     blst_fp12 ml_acc;
-//     blst_miller_loop_lines(&ml_acc, vk.neg_gamma_q_lines, &acc_aff);
+    let mut result = true;
+    for (j, proof) in proofs.iter().enumerate() {
+        ZK_CONFIG.pool.install(|| {
+            rayon::scope(|s| {
+                // Start the two independent miller loops
+                let ml_a_b = Arc::new(Mutex::new(blst_fp12::default()));
+                let ml_all = Arc::new(Mutex::new(blst_fp12::default()));
 
-//     // Gather the threaded miller loops
-//     for (size_t i = 0; i < 2; i++) {
-//       thread_complete[i].lock();
-//     }
-//     blst_fp12_mul(&ml_acc, &ml_acc, &ml_a_b);
-//     blst_fp12_mul(&ml_all, &ml_all, &ml_acc);
-//     blst_final_exp(&ml_all, &ml_all);
+                let ml_result = ml_a_b.clone();
+                s.spawn(move |_| {
+                    let mut r = ml_result.lock().unwrap();
+                    unsafe {
+                        blst_miller_loop(&mut *r, &proof.b_g2, &proof.a_g1);
+                    }
+                });
 
-//     result &= blst_fp12_is_equal(&ml_all, &vk.alpha_g1_beta_g2);
-//   }
-//   return result;
-// }
+                let ml_result = ml_all.clone();
+                s.spawn(move |_| {
+                    let mut r = ml_result.lock().unwrap();
+                    unsafe {
+                        blst_miller_loop_lines(&mut *r, vk.neg_delta_q_lines.as_ptr(), &proof.c_g1);
+                    }
+                });
+
+                // Multiscalar
+
+                let mut acc = blst_p1::default();
+                let subset = vk.multiscalar.at_point(1);
+
+                match public_inputs {
+                    PublicInputs::Slice(s) => {
+                        par_multiscalar(
+                            ZK_CONFIG.pool.current_num_threads(),
+                            &mut acc,
+                            &PublicInputs::Slice(&s[j * num_inputs..]),
+                            &subset,
+                            num_inputs,
+                            256,
+                        );
+                    }
+                    PublicInputs::Getter(_) => {
+                        par_multiscalar(
+                            ZK_CONFIG.pool.current_num_threads(),
+                            &mut acc,
+                            &public_inputs,
+                            &subset,
+                            num_inputs,
+                            256,
+                        );
+                    }
+                }
+                unsafe {
+                    blst_p1_add_or_double_affine(&mut acc, &acc, &vk.ic[0]);
+                }
+                let mut acc_aff = blst_p1_affine::default();
+                unsafe {
+                    blst_p1_to_affine(&mut acc_aff, &acc);
+                }
+
+                // acc miller loop
+                let mut ml_acc = blst_fp12::default();
+                unsafe {
+                    blst_miller_loop_lines(&mut ml_acc, vk.neg_gamma_q_lines.as_ptr(), &acc_aff);
+                }
+
+                // Gather the threaded miller loops
+                let ml_a_b = *ml_a_b.lock().unwrap();
+                let mut ml_all = *ml_all.lock().unwrap();
+
+                unsafe {
+                    blst_fp12_mul(&mut ml_acc, &ml_acc, &ml_a_b);
+                    blst_fp12_mul(&mut ml_all, &ml_all, &ml_acc);
+                    blst_final_exp(&mut ml_all, &ml_all);
+                }
+                result &= unsafe { blst_fp12_is_equal(&ml_all, &vk.alpha_g1_beta_g2) };
+            });
+        });
+    }
+
+    result
+}
 
 // // Verify batch proofs
 // // TODO: make static?
