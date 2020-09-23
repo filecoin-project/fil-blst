@@ -290,16 +290,20 @@ fn prefetch<T>(p: *const T) {
     }
 }
 
+type Getter = dyn Fn(usize) -> blst_scalar + Sync + Send;
+
 // Perform a threaded multiscalar multiplication and accumulation
 // - k or getter should be non-null
-fn par_multiscalar(
+fn par_multiscalar<F>(
     max_threads: usize,
     result: &mut blst_p1,
-    k: &PublicInputs<'_>,
+    k: &PublicInputs<'_, F>,
     precomp_table: &dyn MultiscalarPrecomp,
     num_points: usize,
     nbits: usize,
-) {
+) where
+    F: Fn(usize) -> blst_scalar + Sync + Send,
+{
     // The granularity of work, in points. When a thread gets work it will
     // gather chunk_size points, perform muliscalar on them, and accumulate
     // the result. This is more efficient than evenly dividing the work among
@@ -512,12 +516,12 @@ fn read_vk_file(filename: &str) -> Result<Arc<VerifyingKey>> {
     Ok(vk)
 }
 
-enum PublicInputs<'a> {
+enum PublicInputs<'a, F: Fn(usize) -> blst_scalar + Sync + Send = &'a Getter> {
     Slice(&'a [blst_scalar]),
-    Getter(Box<dyn Fn(usize) -> blst_scalar + Sync + Send>),
+    Getter(F),
 }
 
-impl<'a> PublicInputs<'a> {
+impl<'a, F: Fn(usize) -> blst_scalar + Sync + Send> PublicInputs<'a, F> {
     pub fn get(&self, i: usize) -> blst_scalar {
         match self {
             PublicInputs::Slice(inputs) => inputs[i],
@@ -529,12 +533,12 @@ impl<'a> PublicInputs<'a> {
 /// Verify batch proofs individually
 fn verify_batch_proof_ind<F>(
     proofs: &[Proof],
-    public_inputs: PublicInputs<'_>,
+    public_inputs: PublicInputs<'_, F>,
     num_inputs: usize,
     vk: &VerifyingKey,
 ) -> bool
 where
-    F: Fn(u64) -> blst_scalar + Sync + Send,
+    F: Fn(usize) -> blst_scalar + Sync + Send,
 {
     if (num_inputs + 1) != vk.ic.len() {
         return false;
@@ -571,7 +575,7 @@ where
 
                 match public_inputs {
                     PublicInputs::Slice(s) => {
-                        par_multiscalar(
+                        par_multiscalar::<&Getter>(
                             ZK_CONFIG.pool.current_num_threads(),
                             &mut acc,
                             &PublicInputs::Slice(&s[j * num_inputs..]),
@@ -622,169 +626,216 @@ where
     result
 }
 
-// // Verify batch proofs
-// // TODO: make static?
-// bool verify_batch_proof_inner(PROOF *proofs, size_t num_proofs,
-//                               blst_scalar *public_inputs, size_t num_inputs,
-//                               VERIFYING_KEY& vk,
-//                               blst_scalar *rand_z, size_t nbits) {
-//   // TODO: best size for this?
-//   if (num_proofs < 2) {
-//     return verify_batch_proof_ind(proofs, num_proofs,
-//                                   public_inputs, NULL, num_inputs, vk);
-//   }
+/// Verify batch proofs
+fn verify_batch_proof_inner<F>(
+    proofs: &[Proof],
+    public_inputs: PublicInputs<'_, F>,
+    num_inputs: usize,
+    vk: &VerifyingKey,
+    rand_z: &[blst_scalar],
+    nbits: usize,
+) -> bool
+where
+    F: Fn(usize) -> blst_scalar + Sync + Send,
+{
+    let num_proofs = proofs.len();
+    // TODO: best size for this?
+    if num_proofs < 2 {
+        return verify_batch_proof_ind(proofs, public_inputs, num_inputs, vk);
+    }
 
-//   if ((num_inputs + 1) != vk.ic.size()) {
-//     return false;
-//   }
+    if (num_inputs + 1) != vk.ic.len() {
+        return false;
+    }
 
-//   // Names for the threads
-//   const int ML_D_THR     = 0;
-//   const int ACC_AB_THR   = 1;
-//   const int Y_THR        = 2;
-//   const int ML_G_THR     = 3;
-//   const int WORK_THREADS = 4;
+    // Names for the threads
+    const ML_D_THR: usize = 0;
+    const ACC_AB_THR: usize = 1;
+    const Y_THR: usize = 2;
+    const ML_G_THR: usize = 3;
+    const WORK_THREADS: usize = 4;
 
-//   std::vector<std::mutex> thread_complete(WORK_THREADS);
-//   for (size_t i = 0; i < WORK_THREADS; i++) {
-//     thread_complete[i].lock();
-//   }
+    // This is very fast and needed by two threads so can live here
+    // accum_y = sum(zj)
+    let mut accum_y = blst_fr::default();
+    unsafe {
+        blst_fr_from_scalar(&mut accum_y, &rand_z[0]); // used in multi add and below
+    }
 
-//   // This is very fast and needed by two threads so can live here
-//   // accum_y = sum(zj)
-//   blst_fr accum_y; // used in multi add and below
-//   memcpy(&accum_y, &rand_z[0], sizeof(blst_fr));
-//   for (uint64_t j = 1; j < num_proofs; ++j) {
-//     blst_fr_add(&accum_y, &accum_y, (blst_fr *)&rand_z[j]);
-//   }
+    let mut tmp = blst_fr::default();
+    for r in rand_z.iter().skip(1).take(num_proofs) {
+        unsafe {
+            blst_fr_from_scalar(&mut tmp, r);
+            blst_fr_add(&mut accum_y, &accum_y, &tmp);
+        }
+    }
 
-//   // THREAD 3
-//   blst_fp12 ml_g;
-//   da_pool->schedule([num_proofs, num_inputs, &accum_y,
-//                        &vk, &public_inputs, &rand_z, &ml_g,
-//                        &thread_complete, WORK_THREADS]() {
-//     auto scalar_getter = [num_proofs, num_inputs,
-//                           &accum_y, &rand_z, &public_inputs]
-//       (blst_scalar *s, size_t idx) {
-//       if (idx == 0) {
-//         memcpy(s, &accum_y, sizeof(blst_scalar));
-//       } else {
-//         idx--;
-//         // sum(zj * aj,i)
-//         blst_fr cur_sum, cur_mul, pi_mont, rand_mont;
-//         blst_fr_to(&rand_mont, (blst_fr *)&rand_z[0]);
-//         blst_fr_to(&pi_mont, (blst_fr *)&public_inputs[idx]);
-//         blst_fr_mul(&cur_sum, &rand_mont, &pi_mont);
-//         for (uint64_t j = 1; j < num_proofs; ++j) {
-//           blst_fr_to(&rand_mont, (blst_fr *)&rand_z[j]);
-//           blst_fr_to(&pi_mont, (blst_fr *)&public_inputs[j * num_inputs + idx]);
-//           blst_fr_mul(&cur_mul, &rand_mont, &pi_mont);
-//           blst_fr_add(&cur_sum, &cur_sum, &cur_mul);
-//         }
+    // calculated by thread 3
+    let mut ml_g = blst_fp12::default();
+    // calculated by thread 1
+    let mut ml_d = blst_fp12::default();
+    // calculated by thread 2
+    let mut acc_ab = blst_fp12::default();
+    // calculated by thread 0
+    let mut y = blst_fp12::default();
 
-//         blst_fr_from((blst_fr *)s, &cur_sum);
-//       }
-//     };
-//     ScalarGetter getter(scalar_getter);
+    ZK_CONFIG.pool.install(|| {
+        let accum_y = &accum_y;
+        rayon::scope(|s| {
+            // THREAD 3
+            s.spawn(move |_| {
+                let scalar_getter = |idx: usize| -> blst_scalar {
+                    if idx == 0 {
+                        let mut res = blst_scalar::default();
+                        unsafe {
+                            blst_scalar_from_fr(&mut res, accum_y);
+                        }
+                        return res;
+                    }
+                    let idx = idx - 1;
+                    // sum(zj * aj,i)
+                    let mut cur_sum = blst_fr::default();
+                    let mut cur_mul = blst_fr::default();
+                    let mut pi_mont = blst_fr::default();
+                    let mut rand_mont = blst_fr::default();
+                    unsafe {
+                        blst_fr_from_scalar(&mut rand_mont, &rand_z[0]);
+                        blst_fr_from_scalar(&mut pi_mont, &public_inputs.get(idx));
+                        blst_fr_mul(&mut cur_sum, &rand_mont, &pi_mont);
+                    }
+                    for j in 1..num_proofs {
+                        unsafe {
+                            blst_fr_from_scalar(&mut rand_mont, &rand_z[j]);
+                            blst_fr_from_scalar(
+                                &mut pi_mont,
+                                &public_inputs.get(j * num_inputs + idx),
+                            );
+                            blst_fr_mul(&mut cur_mul, &rand_mont, &pi_mont);
+                            blst_fr_add(&mut cur_sum, &cur_sum, &cur_mul);
+                        }
+                    }
 
-//     // sum_i(accum_g * psi)
-//     blst_p1 acc_g_psi;
-//     par_multiscalar(da_pool->size(),
-//                     &acc_g_psi, NULL, &getter,
-//                     vk.multiscalar, num_inputs + 1, 256);
-//     blst_p1_affine acc_g_psi_aff;
-//     blst_p1_to_affine(&acc_g_psi_aff, &acc_g_psi);
+                    let mut res = blst_scalar::default();
+                    unsafe {
+                        blst_scalar_from_fr(&mut res, &cur_sum);
+                    }
+                    res
+                };
 
-//     // ml(acc_g_psi, vk.gamma)
-//     blst_miller_loop_lines(&ml_g, &(vk.gamma_q_lines[0]), &acc_g_psi_aff);
+                // sum_i(accum_g * psi)
+                let mut acc_g_psi = blst_p1::default();
+                par_multiscalar(
+                    ZK_CONFIG.pool.current_num_threads(),
+                    &mut acc_g_psi,
+                    &PublicInputs::Getter(scalar_getter),
+                    &vk.multiscalar,
+                    num_inputs + 1,
+                    256,
+                );
+                let mut acc_g_psi_aff = blst_p1_affine::default();
+                unsafe {
+                    blst_p1_to_affine(&mut acc_g_psi_aff, &acc_g_psi);
+                }
 
-//     thread_complete[ML_G_THR].unlock();
-//   });
+                // ml(acc_g_psi, vk.gamma)
+                unsafe {
+                    blst_miller_loop_lines(&mut ml_g, &(vk.gamma_q_lines[0]), &acc_g_psi_aff);
+                }
+            });
 
-//   // THREAD 1
-//   blst_fp12 ml_d;
-//   da_pool->schedule([num_proofs, nbits,
-//                        &proofs, &rand_z, &vk, &thread_complete,
-//                        &ml_d]() {
-//     blst_p1 acc_d;
-//     std::vector<blst_p1_affine> points;
-//     points.resize(num_proofs);
-//     for (size_t i = 0; i < num_proofs; i++) {
-//       memcpy(&points[i], &proofs[i].c_g1, sizeof(blst_p1_affine));
-//     }
-//     MultiscalarPrecomp *pre = precompute_fixed_window(points, 1);
-//     multiscalar(&acc_d, rand_z,
-//                 pre, num_proofs, nbits);
-//     delete pre;
+            // THREAD 1
+            s.spawn(move |_| {
+                let mut acc_d = blst_p1::default();
+                let points: Vec<blst_p1_affine> = proofs.iter().map(|p| p.c_g1).collect();
+                {
+                    let pre = precompute_fixed_window(&points, 1);
+                    multiscalar(&mut acc_d, rand_z, &pre, num_proofs, nbits);
+                }
 
-//     blst_p1_affine acc_d_aff;
-//     blst_p1_to_affine(&acc_d_aff, &acc_d);
-//     blst_miller_loop_lines(&ml_d, &(vk.delta_q_lines[0]), &acc_d_aff);
+                let mut acc_d_aff = blst_p1_affine::default();
+                unsafe {
+                    blst_p1_to_affine(&mut acc_d_aff, &acc_d);
+                    blst_miller_loop_lines(&mut ml_d, &(vk.delta_q_lines[0]), &acc_d_aff);
+                }
+            });
 
-//     thread_complete[ML_D_THR].unlock();
-//   });
+            // THREAD 2
+            s.spawn(|_| {
+                // TODO: restrict to pool size - worker thread
+                let accum_ab_mls: Vec<_> = proofs
+                    .par_iter()
+                    .zip(rand_z.par_iter())
+                    .map(|(proof, rand)| {
+                        let mut mul_a = blst_p1::default();
+                        unsafe {
+                            blst_p1_mult_affine(&mut mul_a, &proof.a_g1, &rand, nbits);
+                        }
+                        let mut acc_a_aff = blst_p1_affine::default();
+                        unsafe {
+                            blst_p1_to_affine(&mut acc_a_aff, &mul_a);
+                        }
 
-//   // THREAD 2
-//   blst_fp12 acc_ab;
-//   da_pool->schedule([num_proofs, nbits,
-//                        &vk, &proofs, &rand_z,
-//                        &acc_ab,
-//                        &thread_complete, WORK_THREADS]() {
-//     std::vector<blst_fp12> accum_ab_mls;
-//     accum_ab_mls.resize(num_proofs);
-//     da_pool->parMap(num_proofs, [num_proofs, &proofs, &rand_z,
-//                                    &accum_ab_mls, nbits]
-//                       (size_t j) {
-//       blst_p1 mul_a;
-//       blst_p1_mult_affine(&mul_a, &proofs[j].a_g1, &rand_z[j], nbits);
-//       blst_p1_affine acc_a_aff;
-//       blst_p1_to_affine(&acc_a_aff, &mul_a);
+                        let mut cur_neg_b = blst_p2::default();
+                        let mut cur_neg_b_aff = blst_p2_affine::default();
 
-//       blst_p2 cur_neg_b;
-//       blst_p2_affine cur_neg_b_aff;
-//       blst_p2_from_affine(&cur_neg_b, &proofs[j].b_g2);
-//       blst_p2_cneg(&cur_neg_b, 1);
-//       blst_p2_to_affine(&cur_neg_b_aff, &cur_neg_b);
+                        let mut res = blst_fp12::default();
+                        unsafe {
+                            blst_p2_from_affine(&mut cur_neg_b, &proof.b_g2);
+                            blst_p2_cneg(&mut cur_neg_b, 1);
+                            blst_p2_to_affine(&mut cur_neg_b_aff, &cur_neg_b);
 
-//       blst_miller_loop(&accum_ab_mls[j], &cur_neg_b_aff, &acc_a_aff);
-//     }, da_pool->size() - WORK_THREADS);
+                            blst_miller_loop(&mut res, &cur_neg_b_aff, &acc_a_aff);
+                        }
+                        res
+                    })
+                    .collect();
 
-//     // accum_ab = mul_j(ml((zj*proof_aj), -proof_bj))
-//     memcpy(&acc_ab, &accum_ab_mls[0], sizeof(acc_ab));
-//     for (uint64_t j = 1; j < num_proofs; ++j) {
-//       blst_fp12_mul(&acc_ab, &acc_ab, &accum_ab_mls[j]);
-//     }
+                // accum_ab = mul_j(ml((zj*proof_aj), -proof_bj))
+                acc_ab = accum_ab_mls[0];
 
-//     thread_complete[ACC_AB_THR].unlock();
-//   });
+                for accum in accum_ab_mls.iter().skip(1).take(num_proofs) {
+                    unsafe {
+                        blst_fp12_mul(&mut acc_ab, &acc_ab, accum);
+                    }
+                }
+            });
 
-//   // THREAD 0
-//   blst_fp12 y;
-//   da_pool->schedule([&y, &accum_y, &vk, &thread_complete]() {
-//     // -accum_y
-//     blst_fr accum_y_neg;
-//     blst_fr_cneg(&accum_y_neg, &accum_y, 1);
+            // THREAD 0
+            s.spawn(|_| {
+                // -accum_y
+                let mut accum_y_neg = blst_fr::default();
+                unsafe {
+                    blst_fr_cneg(&mut accum_y_neg, &*accum_y, 1);
+                }
 
-//     // Y^-accum_y
-//     blst_fp12_pow(&y, &vk.alpha_g1_beta_g2, (blst_scalar *)&accum_y_neg);
+                // Y^-accum_y
+                let mut scalar = blst_scalar::default();
+                unsafe {
+                    blst_scalar_from_fr(&mut scalar, &accum_y_neg);
+                    blst_fp12_pow(&mut y, &vk.alpha_g1_beta_g2, &scalar);
+                }
+            });
+        });
+    });
+    let mut ml_all = blst_fp12::default();
 
-//     thread_complete[Y_THR].unlock();
-//   });
+    // TODO: only wait for the needed threads
+    //   thread_complete[ML_D_THR].lock();
+    //   thread_complete[ACC_AB_THR].lock();
+    unsafe {
+        blst_fp12_mul(&mut ml_all, &acc_ab, &ml_d);
+    }
 
-//   blst_fp12 ml_all;
-//   thread_complete[ML_D_THR].lock();
-//   thread_complete[ACC_AB_THR].lock();
-//   blst_fp12_mul(&ml_all, &acc_ab, &ml_d);
-
-//   thread_complete[ML_G_THR].lock();
-//   blst_fp12_mul(&ml_all, &ml_all, &ml_g);
-//   blst_final_exp(&ml_all, &ml_all);
-
-//   thread_complete[Y_THR].lock();
-//   bool res = blst_fp12_is_equal(&ml_all, &y);
-
-//   return res;
-// }
+    // TODO: only wait for the needed threads
+    //   thread_complete[ML_G_THR].lock();
+    unsafe {
+        blst_fp12_mul(&mut ml_all, &ml_all, &ml_g);
+        blst_final_exp(&mut ml_all, &ml_all);
+    }
+    // TODO: only wait for the needed threads
+    //   thread_complete[Y_THR].lock();
+    unsafe { blst_fp12_is_equal(&ml_all, &y) }
+}
 
 // // External entry point for proof verification
 // // - proof_bytes   - proof(s) in byte form, 192 bytes per proof
