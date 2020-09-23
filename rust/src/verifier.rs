@@ -11,7 +11,6 @@ use lazy_static::lazy_static;
 use log::*;
 use rayon::prelude::*;
 
-const SCALAR_SIZE: usize = 256;
 const P1_COMPRESSED_BYTES: usize = 48;
 const P2_COMPRESSED_BYTES: usize = 96;
 const PROOF_BYTES: usize = 192;
@@ -386,6 +385,10 @@ fn read_vk_file(filename: &Path) -> Result<Arc<VerifyingKey>> {
             == BLST_ERROR::BLST_SUCCESS,
         "invalid alpha_g1"
     );
+    ensure!(
+        unsafe { blst_p1_affine_in_g1(&alpha_g1) },
+        "alpha_g1 not in group"
+    );
 
     vk_file.read_exact(&mut g1_bytes)?;
     let mut beta_g1 = blst_p1_affine::default();
@@ -393,12 +396,20 @@ fn read_vk_file(filename: &Path) -> Result<Arc<VerifyingKey>> {
         unsafe { blst_p1_deserialize(&mut beta_g1, g1_bytes.as_ptr()) } == BLST_ERROR::BLST_SUCCESS,
         "invalid beta_g1"
     );
+    ensure!(
+        unsafe { blst_p1_affine_in_g1(&beta_g1) },
+        "beta_g1 not in group"
+    );
 
     vk_file.read_exact(&mut g2_bytes)?;
     let mut beta_g2 = blst_p2_affine::default();
     ensure!(
         unsafe { blst_p2_deserialize(&mut beta_g2, g2_bytes.as_ptr()) } == BLST_ERROR::BLST_SUCCESS,
         "invalid beta_g2"
+    );
+    ensure!(
+        unsafe { blst_p2_affine_in_g2(&beta_g2) },
+        "beta_g2 not in group"
     );
 
     vk_file.read_exact(&mut g2_bytes)?;
@@ -408,6 +419,10 @@ fn read_vk_file(filename: &Path) -> Result<Arc<VerifyingKey>> {
             == BLST_ERROR::BLST_SUCCESS,
         "invalid gamma_g2"
     );
+    ensure!(
+        unsafe { blst_p2_affine_in_g2(&gamma_g2) },
+        "gamma_g2 not in group"
+    );
 
     vk_file.read_exact(&mut g1_bytes)?;
     let mut delta_g1 = blst_p1_affine::default();
@@ -416,6 +431,10 @@ fn read_vk_file(filename: &Path) -> Result<Arc<VerifyingKey>> {
             == BLST_ERROR::BLST_SUCCESS,
         "invalid delta_g1"
     );
+    ensure!(
+        unsafe { blst_p1_affine_in_g1(&delta_g1) },
+        "delta_g1 not in group"
+    );
 
     vk_file.read_exact(&mut g2_bytes)?;
     let mut delta_g2 = blst_p2_affine::default();
@@ -423,6 +442,10 @@ fn read_vk_file(filename: &Path) -> Result<Arc<VerifyingKey>> {
         unsafe { blst_p2_deserialize(&mut delta_g2, g2_bytes.as_ptr()) }
             == BLST_ERROR::BLST_SUCCESS,
         "invalid delta_g2"
+    );
+    ensure!(
+        unsafe { blst_p2_affine_in_g2(&delta_g2) },
+        "delta_g2 not in group"
     );
 
     let ic_len = vk_file.read_u32::<BigEndian>()?;
