@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use std::io::Read;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, RwLock};
 
@@ -18,9 +19,8 @@ const P2_COMPRESSED_BYTES: usize = 96;
 const PROOF_BYTES: usize = 192;
 
 // Singleton to construct and delete state
-#[derive(Debug)]
 struct Config {
-    vk_cache: RwLock<HashMap<String, Arc<VerifyingKey>>>,
+    vk_cache: RwLock<HashMap<PathBuf, Arc<VerifyingKey>>>,
     pool: rayon::ThreadPool,
 }
 
@@ -40,7 +40,6 @@ impl Default for Config {
     }
 }
 
-#[derive(Debug)]
 struct VerifyingKey {
     // Verification key stored values
     alpha_g1: blst_p1_affine,
@@ -368,7 +367,7 @@ fn par_multiscalar<F>(
 }
 
 /// Read verification key file and perform basic precomputations
-fn read_vk_file(filename: &str) -> Result<Arc<VerifyingKey>> {
+fn read_vk_file(filename: &Path) -> Result<Arc<VerifyingKey>> {
     if let Some(result) = ZK_CONFIG.vk_cache.read().unwrap().get(filename) {
         return Ok(result.clone());
     }
@@ -504,7 +503,7 @@ fn read_vk_file(filename: &str) -> Result<Arc<VerifyingKey>> {
         .vk_cache
         .write()
         .unwrap()
-        .insert(filename.to_string(), vk.clone());
+        .insert(filename.to_path_buf(), vk.clone());
 
     Ok(vk)
 }
@@ -840,18 +839,23 @@ where
 pub fn verify_batch_proof(
     proof_bytes: &[u8],
     num_proofs: usize,
-    public_inputs: &[blst_scalar],
+    public_inputs: &[blst_fr],
     num_inputs: usize,
     rand_z: &[blst_scalar],
     nbits: usize,
-    vk_path: &str,
+    vk_path: &Path,
 ) -> bool {
-    for input in public_inputs {
-        if !unsafe { blst_scalar_fr_check(input) } {
-            warn!("invalid public input");
-            return false;
-        }
-    }
+    let public_inputs: Vec<blst_scalar> = public_inputs
+        .into_iter()
+        .map(|input| {
+            let mut scalar = blst_scalar::default();
+            unsafe {
+                blst_scalar_from_fr(&mut scalar, input);
+            }
+            scalar
+        })
+        .collect();
+
     // Decompress and group check in parallel
     let result = ZK_CONFIG.pool.install(|| {
         #[derive(Debug, Clone, Copy)]
@@ -954,13 +958,13 @@ pub fn verify_batch_proof(
             let vk = match read_vk_file(vk_path) {
                 Ok(vk) => vk,
                 Err(err) => {
-                    error!("failed reading vk_file {}: {}", vk_path, err);
+                    error!("failed reading vk_file {}: {}", vk_path.display(), err);
                     return false;
                 }
             };
             verify_batch_proof_inner::<&Getter>(
                 &proofs,
-                PublicInputs::Slice(public_inputs),
+                PublicInputs::Slice(&public_inputs),
                 num_inputs,
                 &vk,
                 rand_z,

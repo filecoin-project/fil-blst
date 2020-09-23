@@ -8,18 +8,11 @@ description = "A library to accelerate SNARK verification for the Filecoin netwo
 repository = "https://github.com/filecoin-project/fil-blst"
 readme = "README.md"
 
-[build-dependencies]
-cc = "1.0"
-bindgen = "0.54.0"
-
-[target.'cfg(target_env = "msvc")'.build-dependencies]
-glob = "0.3.0"
-
 [dependencies]
 paired = "0.20.0"
 groupy = "0.3.1"
 fff = { version = "0.2.2", features = ["derive"] }
-blst = { git = "https://github.com/supranational/blst" }
+blst = { git = "https://github.com/supranational/blst", rev = "cd0847a" }
 sha2 = { version = "0.9.1", features = ["compress"] } 
 lazy_static = "1.4.0"
 rayon = "1.4.0"
