@@ -6,6 +6,7 @@ use std::sync::{Arc, Mutex, RwLock};
 use anyhow::{ensure, Context, Result};
 use blst::*;
 use byteorder::{BigEndian, ReadBytesExt};
+use generic_array::GenericArray;
 use lazy_static::lazy_static;
 use log::*;
 use rayon::prelude::*;
@@ -175,14 +176,6 @@ fn blst_fp12_pow(ret: &mut blst_fp12, a: &blst_fp12, b: &blst_scalar) {
         }
         unsafe { blst_fp12_sqr(&mut a, &a) };
     }
-}
-
-fn make_fr_safe(i: u8) -> u8 {
-    i & 0x7f
-}
-
-fn make_fr_safe_u64(i: u64) -> u64 {
-    i & 0x7fff_ffff_ffff_ffff
 }
 
 /// Precompute tables for fixed bases
@@ -767,9 +760,7 @@ where
                     .zip(rand_z.par_iter())
                     .map(|(proof, rand)| {
                         let mut mul_a = blst_p1::default();
-                        unsafe {
-                            blst_p1_mult_affine(&mut mul_a, &proof.a_g1, &rand, nbits);
-                        }
+                        blst_p1_mult_affine(&mut mul_a, &proof.a_g1, &rand, nbits);
                         let mut acc_a_aff = blst_p1_affine::default();
                         unsafe {
                             blst_p1_to_affine(&mut acc_a_aff, &mul_a);
@@ -837,172 +828,169 @@ where
     unsafe { blst_fp12_is_equal(&ml_all, &y) }
 }
 
-// // External entry point for proof verification
-// // - proof_bytes   - proof(s) in byte form, 192 bytes per proof
-// // - num proofs    - number of proofs provided
-// // - public_inputs - flat array of inputs for all proofs
-// // - num_inputs    - number of public inputs per proof (all same size)
-// // - rand_z        - random scalars for combining proofs
-// // - nbits         - bit size of the scalars. all unused bits must be zero.
-// // - vk_path       - path to the verifying key in the file system
-// // - vk_len        - length of vk_path, in bytes, not including null termination
-// // TODO: change public_inputs to scalar
-// bool verify_batch_proof_c(uint8_t *proof_bytes, size_t num_proofs,
-//                           blst_scalar *public_inputs, size_t num_inputs,
-//                           blst_scalar *rand_z, size_t nbits,
-//                           uint8_t *vk_path, size_t vk_len) {
-//   std::vector<PROOF> proofs;
-//   proofs.resize(num_proofs);
+/// External entry point for proof verification
+/// - proof_bytes   - proof(s) in byte form, 192 bytes per proof
+/// - num proofs    - number of proofs provided
+/// - public_inputs - flat array of inputs for all proofs
+/// - num_inputs    - number of public inputs per proof (all same size)
+/// - rand_z        - random scalars for combining proofs
+/// - nbits         - bit size of the scalars. all unused bits must be zero.
+/// - vk_path       - path to the verifying key in the file system
+/// - vk_len        - length of vk_path, in bytes, not including null termination
+pub fn verify_batch_proof(
+    proof_bytes: &[u8],
+    num_proofs: usize,
+    public_inputs: &[blst_scalar],
+    num_inputs: usize,
+    rand_z: &[blst_scalar],
+    nbits: usize,
+    vk_path: &str,
+) -> bool {
+    for input in public_inputs {
+        if !unsafe { blst_scalar_fr_check(input) } {
+            warn!("invalid public input");
+            return false;
+        }
+    }
+    // Decompress and group check in parallel
+    let result = ZK_CONFIG.pool.install(|| {
+        #[derive(Debug, Clone, Copy)]
+        enum ProofPart {
+            AG1(blst_p1_affine),
+            BG2(blst_p2_affine),
+            CG1(blst_p1_affine),
+        }
 
-//   for (size_t i = 0; i < num_inputs * num_proofs; i++) {
-//     (public_inputs)[i].l[3] = make_fr_safe_u64((public_inputs)[i].l[3]);
-//   }
+        let parts = (0..num_proofs * 3)
+            .into_par_iter()
+            .map(|i| {
+                // Work on all G2 points first since they are more expensive. Avoid
+                // having a long pole due to g2 starting late.
+                let c = i / num_proofs;
+                let p = i % num_proofs;
+                let offset = PROOF_BYTES * p;
+                match c {
+                    0 => {
+                        let mut b_g2 = blst_p2_affine::default();
+                        if unsafe {
+                            blst_p2_uncompress(
+                                &mut b_g2,
+                                proof_bytes[offset + P1_COMPRESSED_BYTES..].as_ptr(),
+                            )
+                        } != BLST_ERROR::BLST_SUCCESS
+                        {
+                            return Err(());
+                        }
+                        if !unsafe { blst_p2_affine_in_g2(&b_g2) } {
+                            return Err(());
+                        }
+                        Ok(ProofPart::BG2(b_g2))
+                    }
+                    1 => {
+                        let mut a_g1 = blst_p1_affine::default();
+                        if unsafe { blst_p1_uncompress(&mut a_g1, proof_bytes[offset..].as_ptr()) }
+                            != BLST_ERROR::BLST_SUCCESS
+                        {
+                            return Err(());
+                        }
+                        if !unsafe { blst_p1_affine_in_g1(&a_g1) } {
+                            return Err(());
+                        }
+                        Ok(ProofPart::AG1(a_g1))
+                    }
+                    2 => {
+                        let mut c_g1 = blst_p1_affine::default();
+                        if unsafe {
+                            blst_p1_uncompress(
+                                &mut c_g1,
+                                proof_bytes[offset + P1_COMPRESSED_BYTES + P2_COMPRESSED_BYTES..]
+                                    .as_ptr(),
+                            )
+                        } != BLST_ERROR::BLST_SUCCESS
+                        {
+                            return Err(());
+                        }
+                        if !unsafe { blst_p1_affine_in_g1(&c_g1) } {
+                            return Err(());
+                        }
+                        Ok(ProofPart::CG1(c_g1))
+                    }
+                    _ => Err(()),
+                }
+            })
+            .collect::<Vec<_>>();
 
-//   // Decompress and group check in parallel
-//   std::atomic<bool> ok(true);
-//   da_pool->parMap(num_proofs * 3, [num_proofs, proof_bytes, &proofs, &ok]
-//                     (size_t i) {
-//     // Work on all G2 points first since they are more expensive. Avoid
-//     // having a long pole due to g2 starting late.
-//     size_t c = i / num_proofs;
-//     size_t p = i % num_proofs;
-//     PROOF *proof = &proofs[p];
-//     size_t offset = PROOF_BYTES * p;
-//     switch(c) {
-//     case 0:
-//       if (blst_p2_uncompress(&proof->b_g2, proof_bytes + offset +
-//                              P1_COMPRESSED_BYTES) !=
-//           BLST_SUCCESS) {
-//         ok = false;
-//       }
-//       if (!blst_p2_affine_in_g2(&proof->b_g2)) {
-//         ok = false;
-//       }
-//       break;
-//     case 1:
-//       if (blst_p1_uncompress(&proof->a_g1, proof_bytes + offset) !=
-//           BLST_SUCCESS) {
-//         ok = false;
-//       }
-//       if (!blst_p1_affine_in_g1(&proof->a_g1)) {
-//         ok = false;
-//       }
-//       break;
-//     case 2:
-//       if (blst_p1_uncompress(&proof->c_g1, proof_bytes + offset +
-//                              P1_COMPRESSED_BYTES + P2_COMPRESSED_BYTES) !=
-//           BLST_SUCCESS) {
-//         ok = false;
-//       }
-//       if (!blst_p1_affine_in_g1(&proof->c_g1)) {
-//         ok = false;
-//       }
-//       break;
-//     }
-//   });
-//   if (!ok) {
-//     return false;
-//   }
+        parts
+            .chunks_exact(3)
+            .map(|chunk| {
+                let b = chunk[0];
+                let a = chunk[1];
+                let c = chunk[2];
+                if a.is_err() || b.is_err() || c.is_err() {
+                    return Err(());
+                }
+                let a_g1 = if let ProofPart::AG1(a_g1) = a.unwrap() {
+                    a_g1
+                } else {
+                    unreachable!("invalid construction");
+                };
+                let b_g2 = if let ProofPart::BG2(b_g2) = b.unwrap() {
+                    b_g2
+                } else {
+                    unreachable!("invalid construction");
+                };
+                let c_g1 = if let ProofPart::CG1(c_g1) = c.unwrap() {
+                    c_g1
+                } else {
+                    unreachable!("invalid construction");
+                };
 
-//   VERIFYING_KEY *vk;
-//   std::string vk_str((const char *)vk_path, vk_len);
-//   read_vk_file(&vk, vk_str);
+                Ok(Proof { a_g1, b_g2, c_g1 })
+            })
+            .collect::<std::result::Result<Vec<Proof>, ()>>()
+    });
+    match result {
+        Ok(proofs) => {
+            let vk = match read_vk_file(vk_path) {
+                Ok(vk) => vk,
+                Err(err) => {
+                    error!("failed reading vk_file {}: {}", vk_path, err);
+                    return false;
+                }
+            };
+            verify_batch_proof_inner::<&Getter>(
+                &proofs,
+                PublicInputs::Slice(public_inputs),
+                num_inputs,
+                &vk,
+                rand_z,
+                nbits,
+            )
+        }
+        Err(()) => false,
+    }
+}
 
-//   int res = verify_batch_proof_inner(proofs.data(), num_proofs,
-//                                      public_inputs, num_inputs,
-//                                      *vk,
-//                                      rand_z, nbits);
-//   return res;
-// }
+// Window post leaf challenge
+pub fn generate_leaf_challenge(
+    buf: &mut [u8],
+    sector_id: u64,
+    leaf_challenge_index: u64,
+    sector_mask: u64,
+) -> u64 {
+    buf[32..40].copy_from_slice(&sector_id.to_be_bytes());
+    buf[40..48].copy_from_slice(&leaf_challenge_index.to_be_bytes());
 
-// // Window post leaf challenge
-// uint64_t generate_leaf_challenge(uint8_t *buf,
-//                                  uint64_t sector_id,
-//                                  uint64_t leaf_challenge_index,
-//                                  uint64_t sector_mask) {
-//   memcpy(buf + 32, &sector_id,  sizeof(sector_id));
-//   memcpy(buf + 40, &leaf_challenge_index, sizeof(leaf_challenge_index));
+    let mut h = [
+        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
+        0x5be0cd19,
+    ];
+    compress256(&mut h, &[*GenericArray::from_slice(&*buf)]);
 
-//   unsigned int h[8] = { 0x6a09e667U, 0xbb67ae85U, 0x3c6ef372U, 0xa54ff53aU,
-//                         0x510e527fU, 0x9b05688cU, 0x1f83d9abU, 0x5be0cd19U };
-//   blst_sha256_block(h, buf, 1);
+    let swap_h0: u64 = ((h[0] as u64 & 0xFF000000) >> 24)
+        | ((h[0] as u64 & 0x00FF0000) >> 8)
+        | ((h[0] as u64 & 0x0000FF00) << 8)
+        | ((h[0] as u64 & 0x000000FF) << 24);
 
-//   unsigned int swap_h0 = ((h[0] & 0xFF000000) >> 24) |
-//                          ((h[0] & 0x00FF0000) >> 8)  |
-//                          ((h[0] & 0x0000FF00) << 8)  |
-//                          ((h[0] & 0x000000FF) << 24);
-
-//   return swap_h0 & sector_mask;
-// }
-
-// extern "C" {
-// int verify_window_post_go(uint8_t *randomness, uint64_t sector_mask,
-//                           uint8_t *sector_comm_r, uint64_t *sector_ids,
-//                           size_t num_sectors,
-//                           size_t challenge_count,
-//                           uint8_t *proof_bytes, size_t num_proofs,
-//                           char *vkfile) {
-//   if (num_proofs > 1) {
-//     printf("WARNING: only single proof supported for window verify!\n");
-//     return 0;
-//   }
-
-//   randomness[31] = make_fr_safe(randomness[31]);
-
-//   PROOF proof;
-//   blst_p1_uncompress(&proof.a_g1, proof_bytes);
-//   blst_p2_uncompress(&proof.b_g2, proof_bytes + P1_COMPRESSED_BYTES);
-//   blst_p1_uncompress(&proof.c_g1, proof_bytes +
-//                      P1_COMPRESSED_BYTES + P2_COMPRESSED_BYTES);
-
-//   bool result = blst_p1_affine_in_g1(&proof.a_g1);
-//   result &= blst_p2_affine_in_g2(&proof.b_g2);
-//   result &= blst_p1_affine_in_g1(&proof.c_g1);
-//   if (!result) {
-//     return 0;
-//   }
-
-//   // Set up the sha buffer for generating leaf nodes
-//   unsigned char base_buf[64] = {0};
-//   memcpy(base_buf, randomness, 32);
-//   base_buf[48] = 0x80; // Padding
-//   base_buf[62] = 0x01; // Length = 0x180 = 384b
-//   base_buf[63] = 0x80;
-
-//   // Parallel leaf node generation
-//   auto scalar_getter = [randomness, sector_ids, sector_comm_r,
-//                         challenge_count, num_sectors, sector_mask,
-//                         base_buf](blst_scalar *s, size_t idx) {
-//     uint64_t sector = idx / (challenge_count + 1);
-//     uint64_t challenge_num = idx % (challenge_count + 1);
-
-//     unsigned char buf[64];
-//     memcpy(buf, base_buf, sizeof(buf));
-
-//     if (challenge_num == 0) {
-//       int top_byte = sector * 32 + 31;
-//       sector_comm_r[top_byte] = make_fr_safe(sector_comm_r[top_byte]);
-//       blst_scalar_from_lendian(s, &sector_comm_r[sector * 32]);
-//     } else {
-//       challenge_num--; // Decrement to account for comm_r
-//       uint64_t challenge_idx = sector * challenge_count + challenge_num;
-//       uint64_t challenge = generate_leaf_challenge(buf,
-//                                                    sector_ids[sector],
-//                                                    challenge_idx, sector_mask);
-//       uint64_t a[4];
-//       memset(a, 0, 4 * sizeof(uint64_t));
-//       a[0] = challenge;
-//       blst_scalar_from_uint64(s, a);
-//     }
-//   };
-//   ScalarGetter getter(scalar_getter);
-
-//   uint64_t inputs_size = num_sectors * (challenge_count + 1);
-
-//   VERIFYING_KEY *vk;
-//   read_vk_file(&vk, std::string(vkfile));
-
-//   bool res = verify_batch_proof_ind(&proof, 1, NULL, &getter, inputs_size, *vk);
-//   return res;
-// }
-// }
+    swap_h0 & sector_mask
+}

@@ -15,6 +15,8 @@ use groupy::EncodedPoint;
 use paired::bls12_381::{Bls12, Fq, Fr, G1Affine, G1Uncompressed, G2Affine, G2Uncompressed};
 use std::path::Path;
 
+pub use self::verifier::*;
+
 extern "C" {
     //     //pub fn print_blst_fr(fr: *const blst_fr);
     pub fn verify_batch_proof_c(
