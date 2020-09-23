@@ -2,16 +2,14 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicUsize, Ordering};
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, RwLock};
 
 use anyhow::{ensure, Context, Result};
 use blst::*;
 use byteorder::{BigEndian, ReadBytesExt};
-use generic_array::GenericArray;
 use lazy_static::lazy_static;
 use log::*;
 use rayon::prelude::*;
-use sha2::compress256;
 
 const SCALAR_SIZE: usize = 256;
 const P1_COMPRESSED_BYTES: usize = 48;
@@ -539,25 +537,18 @@ where
     let mut result = true;
     for (j, proof) in proofs.iter().enumerate() {
         ZK_CONFIG.pool.install(|| {
-            rayon::scope(|s| {
-                // Start the two independent miller loops
-                let ml_a_b = Arc::new(Mutex::new(blst_fp12::default()));
-                let ml_all = Arc::new(Mutex::new(blst_fp12::default()));
+            let mut ml_a_b = blst_fp12::default();
+            let mut ml_all = blst_fp12::default();
+            let mut ml_acc = blst_fp12::default();
 
-                let ml_result = ml_a_b.clone();
-                s.spawn(move |_| {
-                    let mut r = ml_result.lock().unwrap();
-                    unsafe {
-                        blst_miller_loop(&mut *r, &proof.b_g2, &proof.a_g1);
-                    }
+            // Start the two independent miller loops
+            rayon::scope(|s| {
+                s.spawn(move |_| unsafe {
+                    blst_miller_loop(&mut ml_a_b, &proof.b_g2, &proof.a_g1);
                 });
 
-                let ml_result = ml_all.clone();
-                s.spawn(move |_| {
-                    let mut r = ml_result.lock().unwrap();
-                    unsafe {
-                        blst_miller_loop_lines(&mut *r, vk.neg_delta_q_lines.as_ptr(), &proof.c_g1);
-                    }
+                s.spawn(move |_| unsafe {
+                    blst_miller_loop_lines(&mut ml_all, vk.neg_delta_q_lines.as_ptr(), &proof.c_g1);
                 });
 
                 // Multiscalar
@@ -593,25 +584,19 @@ where
                 let mut acc_aff = blst_p1_affine::default();
                 unsafe {
                     blst_p1_to_affine(&mut acc_aff, &acc);
-                }
 
-                // acc miller loop
-                let mut ml_acc = blst_fp12::default();
-                unsafe {
+                    // acc miller loop
                     blst_miller_loop_lines(&mut ml_acc, vk.neg_gamma_q_lines.as_ptr(), &acc_aff);
                 }
+            }); // Gather the threaded miller loop
 
-                // Gather the threaded miller loops
-                let ml_a_b = *ml_a_b.lock().unwrap();
-                let mut ml_all = *ml_all.lock().unwrap();
+            unsafe {
+                blst_fp12_mul(&mut ml_acc, &ml_acc, &ml_a_b);
+                blst_fp12_mul(&mut ml_all, &ml_all, &ml_acc);
+                blst_final_exp(&mut ml_all, &ml_all);
+            }
 
-                unsafe {
-                    blst_fp12_mul(&mut ml_acc, &ml_acc, &ml_a_b);
-                    blst_fp12_mul(&mut ml_all, &ml_all, &ml_acc);
-                    blst_final_exp(&mut ml_all, &ml_all);
-                }
-                result &= unsafe { blst_fp12_is_equal(&ml_all, &vk.alpha_g1_beta_g2) };
-            });
+            result &= unsafe { blst_fp12_is_equal(&ml_all, &vk.alpha_g1_beta_g2) };
         });
     }
 
@@ -639,13 +624,6 @@ where
     if (num_inputs + 1) != vk.ic.len() {
         return false;
     }
-
-    // Names for the threads
-    const ML_D_THR: usize = 0;
-    const ACC_AB_THR: usize = 1;
-    const Y_THR: usize = 2;
-    const ML_G_THR: usize = 3;
-    const WORK_THREADS: usize = 4;
 
     // This is very fast and needed by two threads so can live here
     // accum_y = sum(zj)
@@ -809,22 +787,13 @@ where
     });
     let mut ml_all = blst_fp12::default();
 
-    // TODO: only wait for the needed threads
-    //   thread_complete[ML_D_THR].lock();
-    //   thread_complete[ACC_AB_THR].lock();
     unsafe {
         blst_fp12_mul(&mut ml_all, &acc_ab, &ml_d);
-    }
-
-    // TODO: only wait for the needed threads
-    //   thread_complete[ML_G_THR].lock();
-    unsafe {
         blst_fp12_mul(&mut ml_all, &ml_all, &ml_g);
         blst_final_exp(&mut ml_all, &ml_all);
+
+        blst_fp12_is_equal(&ml_all, &y)
     }
-    // TODO: only wait for the needed threads
-    //   thread_complete[Y_THR].lock();
-    unsafe { blst_fp12_is_equal(&ml_all, &y) }
 }
 
 /// External entry point for proof verification
@@ -973,28 +942,4 @@ pub fn verify_batch_proof(
         }
         Err(()) => false,
     }
-}
-
-// Window post leaf challenge
-pub fn generate_leaf_challenge(
-    buf: &mut [u8],
-    sector_id: u64,
-    leaf_challenge_index: u64,
-    sector_mask: u64,
-) -> u64 {
-    buf[32..40].copy_from_slice(&sector_id.to_be_bytes());
-    buf[40..48].copy_from_slice(&leaf_challenge_index.to_be_bytes());
-
-    let mut h = [
-        0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab,
-        0x5be0cd19,
-    ];
-    compress256(&mut h, &[*GenericArray::from_slice(&*buf)]);
-
-    let swap_h0: u64 = ((h[0] as u64 & 0xFF000000) >> 24)
-        | ((h[0] as u64 & 0x00FF0000) >> 8)
-        | ((h[0] as u64 & 0x0000FF00) << 8)
-        | ((h[0] as u64 & 0x000000FF) << 24);
-
-    swap_h0 & sector_mask
 }

@@ -13,11 +13,9 @@ paired = "0.20.0"
 groupy = "0.3.1"
 fff = { version = "0.2.2", features = ["derive"] }
 blst = { git = "https://github.com/supranational/blst", rev = "cd0847a" }
-sha2 = { version = "0.9.1", features = ["compress"] } 
 lazy_static = "1.4.0"
 rayon = "1.4.0"
 num_cpus = "1.13.0"
 log = "0.4.11"
 anyhow = "1.0.32"
 byteorder = "1.3.4"
-generic-array = "0.14.4"
