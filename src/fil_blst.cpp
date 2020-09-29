@@ -10,7 +10,10 @@
 #include <thread>
 #include <atomic>
 #include <map>
+
+#if (defined(__x86_64__) || defined(__x86_64))
 #include <xmmintrin.h>
+#endif
 
 #include "thread_pool.hpp"
 #include "fil_blst.h"
